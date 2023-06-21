@@ -3,14 +3,18 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Buffers;
+using System.Net.NetworkInformation;
+using Shim.System.Net;
 
 class Socks5Server
 {
     private TcpListener _listener;
+    private IPNetwork? _IPNetwork;
     public CancellationTokenSource CancellationTokenSource { get; } = new CancellationTokenSource();
     public Socks5Server(IPEndPoint endPoint)
     {
         _listener = new TcpListener(endPoint);
+        _IPNetwork = IPNetwork.FindIPV4AddressInNetworkInterfaces(endPoint.Address);
     }
 
     static bool IsValidVersionRequest(ReadOnlySpan<byte> request)
@@ -33,15 +37,36 @@ class Socks5Server
         }
         return true;
     }
-    public async ValueTask Run()
+    public async ValueTask Run(bool restrictSameNetwork)
     {
+        if (restrictSameNetwork && ((IPEndPoint)_listener.LocalEndpoint).Address == IPAddress.Any)
+        {
+            throw new ArgumentException("IPAddress.Any is not allowed", nameof(_listener.LocalEndpoint));
+        }
+
+        if (restrictSameNetwork && _IPNetwork is null)
+        {
+            throw new InvalidOperationException("Cannot find network interface for " + _listener.LocalEndpoint);
+        }
+
         CancellationToken cancellationToken = CancellationTokenSource.Token;
         _listener.Start();
+        System.Console.WriteLine($"Start {_listener.LocalEndpoint}");
+
         int count = 0;
         while (!cancellationToken.IsCancellationRequested)
         {
             var socket = await _listener.AcceptSocketAsync(cancellationToken).ConfigureAwait(false);
-            System.Console.WriteLine($"${count} Accept {socket.RemoteEndPoint}");
+            var remote = (IPEndPoint?)socket.RemoteEndPoint;
+
+            if (restrictSameNetwork && !_IPNetwork!.Value.Contains(remote.Address))
+            {
+                System.Console.WriteLine($"${count} {remote} is rejected.");
+                socket.Dispose();
+                continue;
+            }
+
+            System.Console.WriteLine($"${count} Accept {remote}");
             socket.SendTimeout = 1000;
             socket.ReceiveTimeout = 1000;
             socket.NoDelay = true;
